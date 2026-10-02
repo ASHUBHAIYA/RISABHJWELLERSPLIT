@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   KeyRound,
   ShieldCheck,
@@ -13,19 +13,20 @@ import {
   Lock,
   CheckCircle2,
   AlertCircle,
-  Settings,
   Cloud,
   Code,
-  Globe,
   RefreshCw,
+  Server,
 } from 'lucide-react';
 import { LicenseKeyRecord } from '../types';
 import {
   getCloudflareWorkerConfig,
   saveCloudflareWorkerConfig,
   saveAdminPinToCloudflareKV,
+  createLicenseKeyInCloudflareKV,
   SAMPLE_CF_WORKER_CODE,
   CF_WORKER_KEY_NAME,
+  DEFAULT_CF_WORKER_URL,
 } from '../utils/adminAuth';
 
 interface AdminKeyGeneratorProps {
@@ -58,10 +59,10 @@ export const AdminKeyGenerator: React.FC<AdminKeyGeneratorProps> = ({ isOpen, on
   const [copiedCode, setCopiedCode] = useState(false);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
 
-  // Change PIN & KV settings state
+  // Cloudflare Workers KV settings state (strictly in-memory / remote)
   const [showKvSettings, setShowKvSettings] = useState(false);
   const [showWorkerCode, setShowWorkerCode] = useState(false);
-  const [workerUrlInput, setWorkerUrlInput] = useState(() => getCloudflareWorkerConfig().workerUrl);
+  const [workerUrlInput, setWorkerUrlInput] = useState(() => getCloudflareWorkerConfig().workerUrl || DEFAULT_CF_WORKER_URL);
   const [workerTokenInput, setWorkerTokenInput] = useState(() => getCloudflareWorkerConfig().authToken);
   const [kvStatusMsg, setKvStatusMsg] = useState<string | null>(null);
 
@@ -72,20 +73,8 @@ export const AdminKeyGenerator: React.FC<AdminKeyGeneratorProps> = ({ isOpen, on
   const [pinChangeError, setPinChangeError] = useState<string | null>(null);
   const [pinChangeSuccess, setPinChangeSuccess] = useState<string | null>(null);
 
-  // Saved License History
-  const [savedKeys, setSavedKeys] = useState<LicenseKeyRecord[]>(() => {
-    try {
-      const stored = localStorage.getItem('bullionsplit_admin_license_keys');
-      if (stored) return JSON.parse(stored);
-    } catch {}
-    return [];
-  });
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('bullionsplit_admin_license_keys', JSON.stringify(savedKeys));
-    } catch {}
-  }, [savedKeys]);
+  // Active Session License History (in-memory only, no browser localStorage)
+  const [sessionKeys, setSessionKeys] = useState<LicenseKeyRecord[]>([]);
 
   if (!isOpen) return null;
 
@@ -103,43 +92,15 @@ export const AdminKeyGenerator: React.FC<AdminKeyGeneratorProps> = ({ isOpen, on
     const formattedCreated = createdDate.toISOString().split('T')[0];
     const formattedExpiry = expiryDate.toISOString().split('T')[0];
 
-    let finalLicenseKey = '';
+    // Calls Cloudflare Worker to create and store key in jwellerysplitter KV
+    const result = await createLicenseKeyInCloudflareKV({
+      storeName: storeName.trim(),
+      contactInfo: contactInfo.trim(),
+      durationMonths,
+    });
 
-    // Attempt POST call to license server
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 1200);
-
-      const response = await fetch('https://license.yourdomain.com/admin/create-key', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ATITS_ADMIN_MASTER_KEY_2026',
-        },
-        body: JSON.stringify({
-          storeName: storeName.trim(),
-          contactInfo: contactInfo.trim(),
-          durationMonths,
-          product: 'ATITS_SPLIT_TALLY_BRIDGE',
-        }),
-        signal: controller.signal,
-      }).catch(() => null);
-
-      clearTimeout(timeoutId);
-
-      if (response && response.ok) {
-        const data = await response.json();
-        finalLicenseKey = data.licenseKey || data.key || generateCryptoLicenseKey();
-        setStatusNotice('License Key issued by Remote Licensing Server');
-      } else {
-        // Cryptographic fallback
-        finalLicenseKey = generateCryptoLicenseKey();
-        setStatusNotice('1-Year Key generated successfully');
-      }
-    } catch {
-      finalLicenseKey = generateCryptoLicenseKey();
-      setStatusNotice('1-Year Key generated successfully');
-    }
+    const finalLicenseKey = result.licenseKey || generateCryptoLicenseKey();
+    setStatusNotice(result.message || 'Saved to Cloudflare KV: jwellerysplitter');
 
     const newRecord: LicenseKeyRecord = {
       id: `lic-${Date.now()}`,
@@ -150,11 +111,11 @@ export const AdminKeyGenerator: React.FC<AdminKeyGeneratorProps> = ({ isOpen, on
       createdAt: formattedCreated,
       expiresAt: formattedExpiry,
       status: 'active',
-      generatedBy: 'Admin (Cloudflare Workers KV Auth)',
+      generatedBy: 'Admin (Cloudflare Workers KV: jwellerysplitter)',
     };
 
     setGeneratedKey(newRecord);
-    setSavedKeys((prev) => [newRecord, ...prev]);
+    setSessionKeys((prev) => [newRecord, ...prev]);
     setIsLoading(false);
   };
 
@@ -173,7 +134,7 @@ export const AdminKeyGenerator: React.FC<AdminKeyGeneratorProps> = ({ isOpen, on
   const handleSaveKvConfig = (e: React.FormEvent) => {
     e.preventDefault();
     saveCloudflareWorkerConfig(workerUrlInput, workerTokenInput);
-    setKvStatusMsg('Cloudflare Workers KV configuration saved successfully!');
+    setKvStatusMsg('Worker KV configuration updated!');
     setTimeout(() => setKvStatusMsg(null), 3000);
   };
 
@@ -193,6 +154,7 @@ export const AdminKeyGenerator: React.FC<AdminKeyGeneratorProps> = ({ isOpen, on
     }
 
     setIsUpdatingPin(true);
+    // Writes directly to Cloudflare Workers KV over HTTPS
     const res = await saveAdminPinToCloudflareKV(trimmed);
     setIsUpdatingPin(false);
 
@@ -218,9 +180,11 @@ export const AdminKeyGenerator: React.FC<AdminKeyGeneratorProps> = ({ isOpen, on
   };
 
   const handleDeleteRecord = (id: string) => {
-    setSavedKeys((prev) => prev.filter((k) => k.id !== id));
+    setSessionKeys((prev) => prev.filter((k) => k.id !== id));
     if (generatedKey?.id === id) setGeneratedKey(null);
   };
+
+  const currentCfUrl = getCloudflareWorkerConfig().workerUrl || DEFAULT_CF_WORKER_URL;
 
   return (
     <div
@@ -243,11 +207,11 @@ export const AdminKeyGenerator: React.FC<AdminKeyGeneratorProps> = ({ isOpen, on
                 </h2>
                 <span className="px-1.5 py-0.5 text-[10px] font-mono font-bold bg-amber-400 text-slate-950 rounded flex items-center gap-1">
                   <Cloud className="w-3 h-3" />
-                  <span>CLOUDFLARE KV AUTH</span>
+                  <span>jwellerysplitter KV</span>
                 </span>
               </div>
               <p className="text-xs text-slate-400">
-                Issue 1-Year activation keys for retail jewellery stores using <code className="text-amber-300 font-mono">tally-bridge.exe</code>
+                Connected to Cloudflare Worker: <code className="text-amber-300 font-mono text-[11px]">{currentCfUrl}</code>
               </p>
             </div>
           </div>
@@ -297,7 +261,7 @@ export const AdminKeyGenerator: React.FC<AdminKeyGeneratorProps> = ({ isOpen, on
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 font-bold text-amber-300">
                 <Cloud className="w-4 h-4" />
-                <span>Cloudflare Workers KV Endpoint Configuration</span>
+                <span>Cloudflare Workers KV Endpoint (jwellerysplitter)</span>
               </div>
               <div className="flex items-center gap-2">
                 <button
@@ -321,14 +285,14 @@ export const AdminKeyGenerator: React.FC<AdminKeyGeneratorProps> = ({ isOpen, on
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="block text-slate-300 font-medium mb-1">
-                  Worker KV Endpoint URL *
+                  Cloudflare Worker Endpoint URL *
                 </label>
                 <input
                   type="url"
                   required
                   value={workerUrlInput}
                   onChange={(e) => setWorkerUrlInput(e.target.value)}
-                  placeholder="https://atits-auth.yourworker.workers.dev"
+                  placeholder="https://atits-auth.abhishek791996.workers.dev"
                   className="w-full h-8 px-2.5 text-xs font-mono bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-amber-400"
                 />
               </div>
@@ -341,20 +305,20 @@ export const AdminKeyGenerator: React.FC<AdminKeyGeneratorProps> = ({ isOpen, on
                   type="password"
                   value={workerTokenInput}
                   onChange={(e) => setWorkerTokenInput(e.target.value)}
-                  placeholder="Bearer Token for secure KV API"
+                  placeholder="Bearer Token for KV API"
                   className="w-full h-8 px-2.5 text-xs font-mono bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-amber-400"
                 />
               </div>
             </div>
 
             <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono pt-1">
-              <span>Binding Key: <strong className="text-amber-300">{CF_WORKER_KEY_NAME}</strong></span>
+              <span>Binding Namespace: <strong className="text-amber-300">jwellerysplitter (7275afafaed248e5b28a27d38d259547)</strong></span>
               <div className="flex gap-2">
                 <button
                   type="submit"
                   className="px-3.5 py-1 text-xs font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 rounded-lg transition-colors cursor-pointer"
                 >
-                  Save Worker KV Config
+                  Apply Endpoint
                 </button>
               </div>
             </div>
@@ -461,7 +425,7 @@ export const AdminKeyGenerator: React.FC<AdminKeyGeneratorProps> = ({ isOpen, on
                 className="px-3.5 py-1 text-xs font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 disabled:opacity-50 rounded-lg transition-colors cursor-pointer flex items-center gap-1.5"
               >
                 {isUpdatingPin && <RefreshCw className="w-3 h-3 animate-spin" />}
-                <span>Save to Cloudflare KV</span>
+                <span>Save to Cloudflare Workers KV</span>
               </button>
             </div>
           </form>
@@ -534,7 +498,7 @@ export const AdminKeyGenerator: React.FC<AdminKeyGeneratorProps> = ({ isOpen, on
                 className="flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 disabled:opacity-50 rounded-lg transition-colors cursor-pointer shadow-sm"
               >
                 <Sparkles className="w-3.5 h-3.5" />
-                <span>{isLoading ? 'Generating...' : 'Generate 1-Year Key'}</span>
+                <span>{isLoading ? 'Generating & Storing in KV...' : 'Generate 1-Year Key'}</span>
               </button>
             </div>
           </form>
@@ -588,30 +552,31 @@ export const AdminKeyGenerator: React.FC<AdminKeyGeneratorProps> = ({ isOpen, on
             </div>
           )}
 
-          {/* Generated Keys History Log */}
+          {/* Session License History */}
           <div>
             <div className="flex items-center justify-between mb-2">
-              <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
-                Generated License History ({savedKeys.length})
+              <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                <Server className="w-3.5 h-3.5 text-amber-400" />
+                <span>Session Issued Keys ({sessionKeys.length})</span>
               </h3>
-              {savedKeys.length > 0 && (
+              {sessionKeys.length > 0 && (
                 <button
                   type="button"
-                  onClick={() => setSavedKeys([])}
+                  onClick={() => setSessionKeys([])}
                   className="text-[11px] text-slate-500 hover:text-rose-400 transition-colors cursor-pointer"
                 >
-                  Clear History
+                  Clear Session View
                 </button>
               )}
             </div>
 
             <div className="max-h-48 overflow-y-auto divide-y divide-slate-800 border border-slate-800 rounded-xl bg-slate-950">
-              {savedKeys.length === 0 ? (
+              {sessionKeys.length === 0 ? (
                 <div className="py-8 text-center text-slate-500 font-sans text-xs">
-                  No license keys generated yet in this session.
+                  No license keys generated in this active session.
                 </div>
               ) : (
-                savedKeys.map((k) => (
+                sessionKeys.map((k) => (
                   <div
                     key={k.id}
                     className="flex items-center justify-between p-3 hover:bg-slate-900/80 transition-colors font-mono"
@@ -652,7 +617,7 @@ export const AdminKeyGenerator: React.FC<AdminKeyGeneratorProps> = ({ isOpen, on
                         type="button"
                         onClick={() => handleDeleteRecord(k.id)}
                         className="p-1.5 text-slate-500 hover:text-rose-400 hover:bg-slate-800 rounded cursor-pointer"
-                        title="Delete Entry"
+                        title="Dismiss"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>

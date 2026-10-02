@@ -2,12 +2,9 @@ import React, { useState } from 'react';
 import {
   RefreshCw,
   Send,
-  Wifi,
-  WifiOff,
   Menu,
   X,
   Layers,
-  Sparkles,
   FileSpreadsheet,
   FileCode2,
   Database,
@@ -15,14 +12,13 @@ import {
   Gem,
   KeyRound,
   Lock,
-  ShieldCheck,
   AlertCircle,
   Cloud,
-  CheckCircle2,
+  Key,
+  RotateCcw,
 } from 'lucide-react';
 import { BridgeStatus } from '../types';
 import {
-  hasAdminPinConfigured,
   verifyAdminPinWithCloudflareKV,
   saveAdminPinToCloudflareKV,
   getCloudflareWorkerConfig,
@@ -75,8 +71,7 @@ export const Header: React.FC<HeaderProps> = ({
     setPinInput('');
     setConfirmPinInput('');
     setPinError(null);
-    const hasPin = hasAdminPinConfigured();
-    setIsSettingNewPin(!hasPin);
+    setIsSettingNewPin(false);
     setShowPinPrompt(true);
   };
 
@@ -86,10 +81,10 @@ export const Header: React.FC<HeaderProps> = ({
     setIsVerifying(true);
 
     if (isSettingNewPin) {
-      // First-time Cloudflare Workers KV PIN initialization
+      // Direct Cloudflare Workers KV PIN creation / reset
       const trimmed = pinInput.trim();
       if (trimmed.length < 4) {
-        setPinError('PIN must be at least 4 characters/digits.');
+        setPinError('PIN must be at least 4 characters or digits.');
         setIsVerifying(false);
         return;
       }
@@ -119,7 +114,12 @@ export const Header: React.FC<HeaderProps> = ({
         setPinError(null);
         onOpenAdminKeyGen();
       } else {
-        setPinError(result.message || 'Incorrect Admin PIN. Verification failed against Cloudflare Workers KV.');
+        if (result.message && (result.message.toLowerCase().includes('no pin') || result.message.toLowerCase().includes('empty'))) {
+          setIsSettingNewPin(true);
+          setPinError('No Master PIN found in jwellerysplitter KV. Enter your desired PIN below to initialize it now.');
+        } else {
+          setPinError(result.message || 'Incorrect Admin PIN. Verification failed against Cloudflare Workers KV.');
+        }
       }
     }
   };
@@ -231,7 +231,7 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               type="button"
               onClick={handleOpenPinModal}
-              title="Admin License Key Generator (Cloudflare Workers KV Auth)"
+              title="Admin License Key Generator (Cloudflare Workers KV: jwellerysplitter)"
               className="p-2 text-slate-400 hover:text-amber-400 hover:bg-slate-800/80 rounded-lg border border-slate-800 transition-colors cursor-pointer"
               aria-label="Open Admin License Key Generator"
             >
@@ -314,7 +314,7 @@ export const Header: React.FC<HeaderProps> = ({
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 text-amber-400 font-bold text-sm">
                 <Lock className="w-4 h-4" />
-                <span>{isSettingNewPin ? 'Set Cloudflare KV Admin PIN' : 'Admin Authorization'}</span>
+                <span>{isSettingNewPin ? 'Create / Reset Master PIN' : 'Admin Authorization'}</span>
               </div>
               <button
                 type="button"
@@ -328,21 +328,21 @@ export const Header: React.FC<HeaderProps> = ({
             <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800 text-[11px] text-slate-400 flex items-center gap-2">
               <Cloud className="w-4 h-4 text-amber-400 shrink-0" />
               <div className="truncate">
-                <span>Auth KV: </span>
-                <strong className="text-slate-200 font-mono">{cfConfig.workerUrl ? 'Cloudflare Workers KV' : 'Local KV Storage'}</strong>
+                <span>Auth Backend: </span>
+                <strong className="text-slate-200 font-mono text-[10px]">{cfConfig.workerUrl || 'Cloudflare KV (jwellerysplitter)'}</strong>
               </div>
             </div>
 
             <p className="text-xs text-slate-400 leading-relaxed">
               {isSettingNewPin
-                ? 'Create and save your Master Admin PIN directly to your Cloudflare Workers KV namespace.'
+                ? 'Store a new Master Admin PIN directly into your Cloudflare Workers KV namespace (jwellerysplitter).'
                 : 'Enter your Master Admin PIN to verify with your Cloudflare Workers KV namespace.'}
             </p>
 
             <form onSubmit={handleVerifyOrSetPin} className="space-y-3">
               <div>
                 <label className="block text-[11px] font-semibold text-slate-300 mb-1">
-                  {isSettingNewPin ? 'Create Master PIN (min. 4 chars)' : 'Master Admin PIN'}
+                  {isSettingNewPin ? 'New Master PIN (min. 4 digits)' : 'Master Admin PIN'}
                 </label>
                 <input
                   type="password"
@@ -351,7 +351,7 @@ export const Header: React.FC<HeaderProps> = ({
                   disabled={isVerifying}
                   value={pinInput}
                   onChange={(e) => setPinInput(e.target.value)}
-                  placeholder={isSettingNewPin ? 'Create Admin PIN' : 'Enter Stored PIN'}
+                  placeholder={isSettingNewPin ? 'Enter new PIN' : 'Enter Stored PIN'}
                   className="w-full h-10 px-3 text-center text-base font-mono tracking-widest bg-slate-950 border border-slate-700 rounded-lg text-amber-300 focus:outline-none focus:border-amber-400"
                 />
               </div>
@@ -359,7 +359,7 @@ export const Header: React.FC<HeaderProps> = ({
               {isSettingNewPin && (
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-300 mb-1">
-                    Confirm Master PIN
+                    Confirm New Master PIN
                   </label>
                   <input
                     type="password"
@@ -367,7 +367,7 @@ export const Header: React.FC<HeaderProps> = ({
                     disabled={isVerifying}
                     value={confirmPinInput}
                     onChange={(e) => setConfirmPinInput(e.target.value)}
-                    placeholder="Re-enter Admin PIN"
+                    placeholder="Re-enter new PIN"
                     className="w-full h-10 px-3 text-center text-base font-mono tracking-widest bg-slate-950 border border-slate-700 rounded-lg text-amber-300 focus:outline-none focus:border-amber-400"
                   />
                 </div>
@@ -397,10 +397,36 @@ export const Header: React.FC<HeaderProps> = ({
                   {isVerifying ? (
                     <>
                       <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                      <span>Verifying KV...</span>
+                      <span>Checking KV...</span>
                     </>
                   ) : (
-                    <span>{isSettingNewPin ? 'Save to KV' : 'Verify PIN'}</span>
+                    <span>{isSettingNewPin ? 'Save PIN to KV' : 'Verify PIN'}</span>
+                  )}
+                </button>
+              </div>
+
+              {/* Mode Toggle Button: Initialize/Reset PIN vs Verify */}
+              <div className="pt-2 text-center border-t border-slate-800/80">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsSettingNewPin((prev) => !prev);
+                    setPinInput('');
+                    setConfirmPinInput('');
+                    setPinError(null);
+                  }}
+                  className="text-[11px] text-amber-400 hover:text-amber-300 font-medium cursor-pointer inline-flex items-center gap-1"
+                >
+                  {isSettingNewPin ? (
+                    <>
+                      <Key className="w-3 h-3" />
+                      <span>Back to PIN Verification</span>
+                    </>
+                  ) : (
+                    <>
+                      <RotateCcw className="w-3 h-3" />
+                      <span>Empty KV or Forgot PIN? Initialize / Reset Master PIN</span>
+                    </>
                   )}
                 </button>
               </div>
