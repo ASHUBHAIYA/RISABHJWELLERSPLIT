@@ -30,8 +30,44 @@ export function saveCloudflareWorkerConfig(workerUrl: string, authToken: string)
 }
 
 /**
+ * Checks if the local Go daemon is currently active and polling the Cloudflare Relay Worker
+ */
+export async function checkCloudflareRelayDaemonOnline(
+  licenseKey: string = 'DEFAULT'
+): Promise<{ online: boolean; lastSeenSecondsAgo?: number }> {
+  const { workerUrl } = getCloudflareWorkerConfig();
+  const targetUrl = (workerUrl || DEFAULT_CF_WORKER_URL).replace(/\/+$/, '');
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3500);
+
+    const res = await fetch(`${targetUrl}/relay/daemon-status?licenseKey=${encodeURIComponent(licenseKey)}`, {
+      method: 'GET',
+      signal: controller.signal,
+    }).catch(async () => {
+      return await fetch(`${targetUrl}/relay/status`, {
+        method: 'GET',
+        signal: controller.signal,
+      });
+    });
+
+    clearTimeout(timer);
+
+    if (res && res.ok) {
+      const data = await res.json().catch(() => ({}));
+      return {
+        online: data.online === true || data.status === 'active' || (data.lastSeenSecondsAgo !== null && data.lastSeenSecondsAgo < 30),
+        lastSeenSecondsAgo: data.lastSeenSecondsAgo,
+      };
+    }
+  } catch {}
+
+  return { online: false };
+}
+
+/**
  * Verifies Admin PIN directly against Cloudflare Workers KV endpoint via HTTP request.
- * Zero browser localStorage is used for credential storage.
  */
 export async function verifyAdminPinWithCloudflareKV(
   enteredPin: string
@@ -65,7 +101,6 @@ export async function verifyAdminPinWithCloudflareKV(
       }),
       signal: controller.signal,
     }).catch(async () => {
-      // Fallback query parameter format for simple Workers
       return await fetch(
         `${targetUrl.replace(/\/+$/, '')}?action=verify&key=${encodeURIComponent(kvKeyName)}&pin=${encodeURIComponent(cleanPin)}`,
         {
@@ -111,7 +146,6 @@ export async function verifyAdminPinWithCloudflareKV(
 
 /**
  * Saves or updates the Admin PIN directly into Cloudflare Workers KV namespace.
- * Zero browser localStorage is used.
  */
 export async function saveAdminPinToCloudflareKV(
   newPin: string
@@ -226,7 +260,6 @@ export async function createLicenseKeyInCloudflareKV(params: {
     }
   } catch {}
 
-  // Fallback generation if offline
   const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
   const chunk = () => Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
   const fallbackKey = `JWEL-${chunk()}-${chunk()}-${chunk()}`;
@@ -239,15 +272,169 @@ export async function createLicenseKeyInCloudflareKV(params: {
 }
 
 /**
- * Tailored Cloudflare Worker Script for namespace 'jwellerysplitter' (ID: 7275afafaed248e5b28a27d38d259547)
+ * Queries Tally via Cloudflare Relay and waits for Go daemon response
  */
-export const SAMPLE_CF_WORKER_CODE = `/**
- * Cloudflare Worker for ATITS Split
- * KV Namespace: jwellerysplitter (ID: 7275afafaed248e5b28a27d38d259547)
- * Live Worker: https://atits-auth.abhishek791996.workers.dev
- */
+export async function queryTallyViaCloudflareRelay(
+  xmlQuery: string,
+  licenseKey: string = 'DEFAULT'
+): Promise<{ success: boolean; tallyResponse?: string; error?: string }> {
+  const { workerUrl, authToken } = getCloudflareWorkerConfig();
+  const targetUrl = (workerUrl || DEFAULT_CF_WORKER_URL).replace(/\/+$/, '');
 
-export default {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+
+    const pushRes = await fetch(`${targetUrl}/relay/push`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        licenseKey: (licenseKey || 'DEFAULT').trim(),
+        xml: xmlQuery,
+        timestamp: new Date().toISOString(),
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timer);
+    if (!pushRes.ok) return { success: false, error: 'Push failed' };
+
+    const pushData = await pushRes.json().catch(() => ({}));
+    const jobId = pushData.jobId;
+    if (!jobId) return { success: false, error: 'No Job ID' };
+
+    // Poll for Go daemon result (5 seconds)
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const statusRes = await fetch(`${targetUrl}/relay/status?jobId=${jobId}`, {
+        method: 'GET',
+        headers,
+      }).catch(() => null);
+
+      if (statusRes && statusRes.ok) {
+        const sData = await statusRes.json().catch(() => ({}));
+        if (sData.completed) {
+          if (sData.status === 'success' || sData.tallyResponse) {
+            return {
+              success: true,
+              tallyResponse: sData.tallyResponse,
+            };
+          } else {
+            return {
+              success: false,
+              error: sData.error || 'Tally offline',
+            };
+          }
+        }
+      }
+    }
+
+    return { success: false, error: 'Timeout waiting for Go daemon' };
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : 'Timeout';
+    return { success: false, error: errMsg };
+  }
+}
+
+/**
+ * Pushes Tally XML Vouchers via Cloudflare Relay Queue and polls for the Daemon execution result
+ */
+export async function pushVoucherViaCloudflareRelay(
+  xmlPayload: string,
+  licenseKey: string = 'DEFAULT'
+): Promise<{ success: boolean; status?: string; message: string; tallyResponse?: string }> {
+  const { workerUrl, authToken } = getCloudflareWorkerConfig();
+  const targetUrl = (workerUrl || DEFAULT_CF_WORKER_URL).replace(/\/+$/, '');
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (authToken) {
+      headers['Authorization'] = `Bearer ${authToken}`;
+    }
+
+    const pushRes = await fetch(`${targetUrl}/relay/push`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        licenseKey: (licenseKey || 'DEFAULT').trim(),
+        xml: xmlPayload,
+        timestamp: new Date().toISOString(),
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timer);
+
+    if (!pushRes.ok) {
+      const err = await pushRes.text().catch(() => '');
+      return { success: false, message: err || 'Relay push failed' };
+    }
+
+    const pushData = await pushRes.json().catch(() => ({}));
+    const jobId = pushData.jobId;
+    if (!jobId) {
+      return { success: false, message: 'No Job ID returned from Cloudflare' };
+    }
+
+    // Poll for Go Daemon execution result (up to 5 attempts)
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setTimeout(r, 1200));
+      const statusRes = await fetch(`${targetUrl}/relay/status?jobId=${jobId}`, {
+        method: 'GET',
+        headers,
+      }).catch(() => null);
+
+      if (statusRes && statusRes.ok) {
+        const sData = await statusRes.json().catch(() => ({}));
+        if (sData.completed) {
+          if (sData.status === 'success') {
+            return {
+              success: true,
+              status: 'success',
+              message: 'Vouchers created in Tally via local bridge daemon!',
+              tallyResponse: sData.tallyResponse,
+            };
+          } else if (sData.status === 'tally_offline') {
+            return {
+              success: false,
+              status: 'tally_offline',
+              message: sData.error || 'Tally is offline on port 9000. Please open your company in Tally.',
+            };
+          } else if (sData.status === 'tally_rejected') {
+            return {
+              success: false,
+              status: 'tally_rejected',
+              message: sData.error || 'Tally rejected the vouchers. Check ledgers and dates.',
+              tallyResponse: sData.tallyResponse,
+            };
+          }
+        }
+      }
+    }
+
+    return {
+      success: false,
+      status: 'pending',
+      message: 'Go daemon picked up job. Check Tally Day Book.',
+    };
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : 'Timeout';
+    return { success: false, message: `Cloudflare Relay unreachable: ${errMsg}` };
+  }
+}
+
+/**
+ * Cloudflare Worker Script with License verification, Heartbeat, and Job Relay endpoints
+ */
+export const SAMPLE_CF_WORKER_CODE = `export default {
   async fetch(request, env) {
     const KV = env.jwellerysplitter || env.ATITS_AUTH_KV;
     
@@ -274,7 +461,7 @@ export default {
     const KV_KEY = "ADMIN_MASTER_PIN";
 
     // 1. Verify Admin PIN (POST /verify)
-    if (url.pathname.endsWith("/verify") && request.method === "POST") {
+    if (url.pathname.endsWith("/verify") && !url.pathname.includes("license") && request.method === "POST") {
       const { pin } = await request.json().catch(() => ({}));
       const storedPin = await KV.get(KV_KEY);
       
@@ -319,12 +506,19 @@ export default {
       const chunk = () => Array.from({length: 4}, () => chars[Math.floor(Math.random() * chars.length)]).join('');
       const licenseKey = \`JWEL-\${chunk()}-\${chunk()}-\${chunk()}\`;
 
+      const durationMonths = parseInt(body.durationMonths || 12, 10);
+      const createdDate = new Date();
+      const expiryDate = new Date();
+      expiryDate.setMonth(expiryDate.getMonth() + durationMonths);
+
       const record = {
         licenseKey,
         storeName: body.storeName || "Jewellery Store",
         contactInfo: body.contactInfo || "",
-        durationMonths: body.durationMonths || 12,
-        createdAt: new Date().toISOString().split('T')[0],
+        durationMonths,
+        createdAt: createdDate.toISOString().split('T')[0],
+        expiresAt: expiryDate.toISOString().split('T')[0],
+        machineId: "",
         status: "active"
       };
 
@@ -335,8 +529,178 @@ export default {
       });
     }
 
+    // 4. Verify License Key from Tally Bridge Daemon (POST /verify-license)
+    if (url.pathname.includes("/verify-license") && request.method === "POST") {
+      const { licenseKey, machineId } = await request.json().catch(() => ({}));
+
+      if (!licenseKey) {
+        return new Response(JSON.stringify({ success: false, error: "License key is required" }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+
+      const cleanKey = licenseKey.trim();
+      const rawRecord = await KV.get(\`LICENSE_\${cleanKey}\`);
+      if (!rawRecord) {
+        return new Response(JSON.stringify({ success: false, error: \`Invalid license key: \${cleanKey}\` }), {
+          status: 404,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+
+      const record = JSON.parse(rawRecord);
+
+      if (record.status !== "active") {
+        return new Response(JSON.stringify({ success: false, error: "License is disabled or revoked" }), {
+          status: 403,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+
+      if (!record.expiresAt) {
+        const created = record.createdAt ? new Date(record.createdAt) : new Date();
+        created.setMonth(created.getMonth() + (record.durationMonths || 12));
+        record.expiresAt = created.toISOString().split('T')[0];
+      }
+
+      const today = new Date().toISOString().split('T')[0];
+      if (record.expiresAt && record.expiresAt < today) {
+        return new Response(JSON.stringify({ success: false, error: \`License expired on \${record.expiresAt}\` }), {
+          status: 403,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+
+      if (!record.machineId && machineId) {
+        record.machineId = machineId;
+        await KV.put(\`LICENSE_\${cleanKey}\`, JSON.stringify(record));
+      } else if (record.machineId && machineId && record.machineId !== machineId) {
+        return new Response(JSON.stringify({ 
+          success: false, 
+          error: "License is already registered to a different computer" 
+        }), {
+          status: 403,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+
+      return new Response(JSON.stringify({
+        success: true,
+        status: record.status,
+        expires_at: record.expiresAt,
+        storeName: record.storeName,
+        machineId: record.machineId
+      }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
+
+    // 5. Browser pushes XML/JSON payload to Cloudflare Queue (POST /relay/push)
+    if (url.pathname.includes("/relay/push") && request.method === "POST") {
+      const body = await request.json().catch(() => ({}));
+      const licenseKey = (body.licenseKey || "DEFAULT").trim();
+      const jobId = \`job_\${Date.now()}\`;
+
+      await KV.put(\`QUEUE_\${licenseKey}_\${jobId}\`, JSON.stringify(body), { expirationTtl: 3600 });
+      await KV.put(\`LATEST_JOB_\${licenseKey}\`, jobId, { expirationTtl: 3600 });
+
+      return new Response(JSON.stringify({ success: true, jobId }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
+
+    // 6. tally-bridge.exe polls for its store's pending jobs (GET /relay/poll?licenseKey=...)
+    if (url.pathname.includes("/relay/poll") && request.method === "GET") {
+      const licenseKey = (url.searchParams.get("licenseKey") || "DEFAULT").trim();
+      
+      // Update Heartbeat
+      await KV.put(\`DAEMON_HEARTBEAT_\${licenseKey}\`, Date.now().toString(), { expirationTtl: 60 });
+      await KV.put("DAEMON_HEARTBEAT_DEFAULT", Date.now().toString(), { expirationTtl: 60 });
+
+      const latestJobId = await KV.get(\`LATEST_JOB_\${licenseKey}\`);
+
+      if (!latestJobId) {
+        return new Response(JSON.stringify({ pending: false }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+
+      const payload = await KV.get(\`QUEUE_\${licenseKey}_\${latestJobId}\`);
+      await KV.delete(\`LATEST_JOB_\${licenseKey}\`);
+      await KV.delete(\`QUEUE_\${licenseKey}_\${latestJobId}\`);
+
+      return new Response(JSON.stringify({ 
+        pending: true, 
+        jobId: latestJobId, 
+        data: payload ? JSON.parse(payload) : null 
+      }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
+
+    // 7. Update Job Status / Result (POST /relay/status)
+    if (url.pathname.includes("/relay/status") && request.method === "POST") {
+      const { jobId, status, error, tallyResponse } = await request.json().catch(() => ({}));
+      if (!jobId) {
+        return new Response(JSON.stringify({ error: "jobId is required" }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+
+      const result = {
+        status, // "success" | "tally_offline" | "tally_rejected"
+        error: error || null,
+        tallyResponse: tallyResponse || null,
+        updatedAt: new Date().toISOString()
+      };
+
+      await KV.put(\`STATUS_\${jobId}\`, JSON.stringify(result), { expirationTtl: 600 });
+
+      return new Response(JSON.stringify({ success: true }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
+
+    // 8. Daemon Heartbeat Check (GET /relay/daemon-status)
+    if (url.pathname.includes("/relay/daemon-status") || (url.pathname.includes("/relay/status") && !url.searchParams.get("jobId"))) {
+      const licenseKey = (url.searchParams.get("licenseKey") || "DEFAULT").trim();
+      const lastHeartbeat = await KV.get(\`DAEMON_HEARTBEAT_\${licenseKey}\`) || await KV.get("DAEMON_HEARTBEAT_DEFAULT");
+      
+      const isAlive = !!lastHeartbeat && (Date.now() - parseInt(lastHeartbeat, 10) < 20000);
+      return new Response(JSON.stringify({
+        online: isAlive,
+        lastSeenSecondsAgo: lastHeartbeat ? Math.round((Date.now() - parseInt(lastHeartbeat, 10)) / 1000) : null
+      }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
+
+    // 9. Frontend checks Job Execution Status (GET /relay/status?jobId=...)
+    if (url.pathname.includes("/relay/status") && request.method === "GET") {
+      const jobId = url.searchParams.get("jobId");
+      if (!jobId) {
+        return new Response(JSON.stringify({ error: "jobId required" }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+
+      const raw = await KV.get(\`STATUS_\${jobId}\`);
+      if (!raw) {
+        return new Response(JSON.stringify({ completed: false, status: "pending" }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+
+      return new Response(JSON.stringify({ completed: true, ...JSON.parse(raw) }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
+
     return new Response(JSON.stringify({ 
-      status: "Cloudflare Workers KV (jwellerysplitter) Active",
+      status: "Cloudflare Workers KV (jwellerysplitter) Active & HTTPS Relay Ready",
       namespaceId: "7275afafaed248e5b28a27d38d259547" 
     }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" }

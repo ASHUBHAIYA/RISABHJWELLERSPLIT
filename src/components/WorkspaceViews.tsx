@@ -18,6 +18,7 @@ interface XmlInspectorViewProps {
   xmlPayload: string;
   bills: SplitBill[];
   config: SplitConfig;
+  bridgeStatus?: BridgeStatus;
   onDownloadXml: () => void;
   onPushToTally: () => void;
   onBackToWorkbench: () => void;
@@ -27,6 +28,7 @@ export const XmlInspectorView: React.FC<XmlInspectorViewProps> = ({
   xmlPayload,
   bills,
   config,
+  bridgeStatus,
   onDownloadXml,
   onPushToTally,
   onBackToWorkbench,
@@ -77,10 +79,16 @@ export const XmlInspectorView: React.FC<XmlInspectorViewProps> = ({
           <button
             type="button"
             onClick={onPushToTally}
-            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-slate-950 bg-amber-400 hover:bg-amber-300 rounded-md transition-colors cursor-pointer"
+            disabled={!bridgeStatus?.connected || bills.length === 0}
+            title={
+              !bridgeStatus?.connected
+                ? 'Tally Bridge is Offline. Start tally-bridge.exe & open company in Tally.'
+                : 'Dispatch XML vouchers into Tally'
+            }
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-slate-950 bg-amber-400 hover:bg-amber-300 disabled:opacity-40 disabled:hover:bg-amber-400 rounded-md transition-colors cursor-pointer disabled:cursor-not-allowed"
           >
             <Send className="w-3.5 h-3.5" />
-            <span>Dispatch to Tally</span>
+            <span>{bridgeStatus?.connected ? 'Dispatch to Tally' : 'Tally Offline'}</span>
           </button>
         </div>
       </div>

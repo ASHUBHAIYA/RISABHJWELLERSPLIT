@@ -242,8 +242,15 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               type="button"
               onClick={onPushToTally}
-              disabled={isPushing || billCount === 0}
-              className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 disabled:opacity-40 disabled:hover:bg-amber-400 rounded-lg transition-all shadow-xs cursor-pointer whitespace-nowrap"
+              disabled={isPushing || billCount === 0 || !bridgeStatus.connected}
+              title={
+                !bridgeStatus.connected
+                  ? 'Tally Bridge is Offline. Start tally-bridge.exe and open your company in Tally to push.'
+                  : billCount === 0
+                  ? 'Generate bills first to push'
+                  : 'Push vouchers directly into TallyPrime'
+              }
+              className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 disabled:opacity-40 disabled:hover:bg-amber-400 rounded-lg transition-all shadow-xs cursor-pointer disabled:cursor-not-allowed whitespace-nowrap"
             >
               {isPushing ? (
                 <RefreshCw className="w-3.5 h-3.5 animate-spin" />
@@ -253,6 +260,8 @@ export const Header: React.FC<HeaderProps> = ({
               <span>
                 {isPushing
                   ? 'Syncing...'
+                  : !bridgeStatus.connected
+                  ? 'Tally Offline'
                   : unsyncedCount > 0
                   ? `Push (${unsyncedCount.toLocaleString('en-IN')})`
                   : `Push to Tally`}

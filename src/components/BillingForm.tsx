@@ -43,6 +43,7 @@ interface BillingFormProps {
   lastGeneratedAt: string;
   isPushing: boolean;
   billCount: number;
+  bridgeConnected?: boolean;
 }
 
 export const BillingForm: React.FC<BillingFormProps> = ({
@@ -71,6 +72,7 @@ export const BillingForm: React.FC<BillingFormProps> = ({
   lastGeneratedAt,
   isPushing,
   billCount,
+  bridgeConnected = false,
 }) => {
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
 
@@ -595,11 +597,18 @@ export const BillingForm: React.FC<BillingFormProps> = ({
             <button
               type="button"
               onClick={onPushToTally}
-              disabled={isPushing || billCount === 0}
-              className="flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap cursor-pointer shadow-xs"
+              disabled={isPushing || billCount === 0 || !bridgeConnected}
+              title={
+                !bridgeConnected
+                  ? 'Tally Bridge is Offline. Please start tally-bridge.exe & open company in Tally.'
+                  : billCount === 0
+                  ? 'Generate bills first'
+                  : 'Push vouchers to open Tally company'
+              }
+              className="flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 disabled:opacity-40 disabled:hover:bg-amber-400 rounded-lg transition-colors whitespace-nowrap cursor-pointer disabled:cursor-not-allowed shadow-xs"
             >
               <Send className="w-3.5 h-3.5" />
-              <span>Push to Tally</span>
+              <span>{bridgeConnected ? 'Push to Tally' : 'Tally Offline'}</span>
             </button>
           </div>
         </div>
