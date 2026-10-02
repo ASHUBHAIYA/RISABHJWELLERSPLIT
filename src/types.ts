@@ -83,11 +83,13 @@ export interface VoucherSyncLog {
 
 export interface BridgeStatus {
   connected: boolean;
-  endpoint: string;
+  endpoint: string; // '127.0.0.1:8080' for tally-bridge.exe service or 'localhost:9000'
+  serviceName: string; // 'tally-bridge.exe' Windows Background Service
   mode: 'live-localhost' | 'simulated-agent';
   companyName: string;
   lastPingTime: string;
   tallyVersion: string;
+  latencyMs?: number;
 }
 
 export interface BankVoucherEntry {
@@ -102,4 +104,16 @@ export interface BankVoucherEntry {
   selected: boolean;
   syncStatus?: 'idle' | 'pending' | 'synced' | 'failed';
   tallyMasterId?: string;
+}
+
+export interface LicenseKeyRecord {
+  id: string;
+  licenseKey: string; // e.g. JWEL-8F92-K4M9-9182
+  storeName: string;
+  contactInfo: string;
+  durationMonths: number; // e.g. 12
+  createdAt: string;
+  expiresAt: string;
+  status: 'active' | 'revoked' | 'expired';
+  generatedBy: string;
 }

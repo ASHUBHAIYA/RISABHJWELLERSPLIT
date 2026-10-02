@@ -177,20 +177,20 @@ export const StockAndLedgersView: React.FC<StockAndLedgersViewProps> = ({
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5 mb-4">
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">
-              Tally XML Endpoint (Port)
+              Tally Bridge Endpoint (Port)
             </label>
             <div className="flex gap-2">
               <input
                 type="text"
                 value={customEndpoint}
                 onChange={(e) => setCustomEndpoint(e.target.value)}
-                placeholder="localhost:9000"
+                placeholder="127.0.0.1:8080"
                 className="h-8 flex-1 px-2.5 text-xs font-mono border border-slate-300 rounded-lg focus:outline-none focus:border-amber-600"
               />
               <button
                 type="button"
                 onClick={() => setBridgeStatus((prev) => ({ ...prev, endpoint: customEndpoint }))}
-                className="px-3 py-1 text-xs font-bold text-slate-900 bg-slate-200 hover:bg-slate-300 rounded-lg"
+                className="px-3 py-1 text-xs font-bold text-slate-900 bg-slate-200 hover:bg-slate-300 rounded-lg cursor-pointer"
               >
                 Apply
               </button>
@@ -206,13 +206,13 @@ export const StockAndLedgersView: React.FC<StockAndLedgersViewProps> = ({
                 type="text"
                 value={customCompany}
                 onChange={(e) => setCustomCompany(e.target.value)}
-                placeholder="Company Name"
+                placeholder="SHREE BULLION & JEWELLERS PVT LTD"
                 className="h-8 flex-1 px-2.5 text-xs font-mono border border-slate-300 rounded-lg focus:outline-none focus:border-amber-600"
               />
               <button
                 type="button"
                 onClick={() => setBridgeStatus((prev) => ({ ...prev, companyName: customCompany }))}
-                className="px-3 py-1 text-xs font-bold text-slate-900 bg-slate-200 hover:bg-slate-300 rounded-lg"
+                className="px-3 py-1 text-xs font-bold text-slate-900 bg-slate-200 hover:bg-slate-300 rounded-lg cursor-pointer"
               >
                 Save
               </button>
@@ -222,10 +222,10 @@ export const StockAndLedgersView: React.FC<StockAndLedgersViewProps> = ({
           <div className="bg-amber-50/70 p-3 rounded-lg border border-amber-200 text-xs text-amber-950 space-y-1">
             <div className="font-bold flex items-center gap-1">
               <HelpCircle className="w-3.5 h-3.5 text-amber-700" />
-              <span>How to Enable Tally XML Server:</span>
+              <span>Windows Bridge Service:</span>
             </div>
             <p className="text-[11px] text-slate-600 leading-snug">
-              In Tally Prime: Press <strong>F1 (Help)</strong> &rarr; <strong>Settings</strong> &rarr; <strong>Connectivity</strong> &rarr; Enable <strong>ODBC &amp; XML Server</strong> on Port <strong>9000</strong>.
+              Run <strong className="text-slate-900 font-mono">tally-bridge.exe</strong> locally on port <strong className="text-slate-900 font-mono">127.0.0.1:8080</strong>, or enable Tally Prime XML server (<strong className="text-slate-900">F1 &rarr; Connectivity</strong>) on port <strong className="text-slate-900 font-mono">9000</strong>.
             </p>
           </div>
         </div>

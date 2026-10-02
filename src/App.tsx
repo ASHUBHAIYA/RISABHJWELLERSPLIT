@@ -5,6 +5,7 @@ import { BillGrid } from './components/BillGrid';
 import { TallySyncDrawer } from './components/TallySyncDrawer';
 import { BankStatementModal } from './components/BankStatementModal';
 import { BankStatementManager } from './components/BankStatementManager';
+import { AdminKeyGenerator } from './components/AdminKeyGenerator';
 import {
   XmlInspectorView,
   StockAndLedgersView,
@@ -49,6 +50,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('workbench');
   const [drawerOpen, setDrawerOpen] = useState<boolean>(false);
   const [bankModalOpen, setBankModalOpen] = useState<boolean>(false);
+  const [adminModalOpen, setAdminModalOpen] = useState<boolean>(false);
   const [isPushing, setIsPushing] = useState<boolean>(false);
   const [isFetchingInvoice, setIsFetchingInvoice] = useState<boolean>(false);
   const [syncProgress, setSyncProgress] = useState<{ current: number; total: number }>({
@@ -59,10 +61,11 @@ export default function App() {
   const [httpAttemptNotice, setHttpAttemptNotice] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // Accurate Initial State: OFFLINE until actively verified
+  // Connects with Windows Background Service (tally-bridge.exe running on 127.0.0.1:8080)
   const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>({
     connected: false,
-    endpoint: 'localhost:9000',
+    endpoint: '127.0.0.1:8080',
+    serviceName: 'tally-bridge.exe (Windows Service)',
     mode: 'simulated-agent',
     companyName: 'SHREE BULLION & JEWELLERS PVT LTD',
     lastPingTime: new Date().toLocaleTimeString('en-IN', {
@@ -70,7 +73,8 @@ export default function App() {
       minute: '2-digit',
       second: '2-digit',
     }),
-    tallyVersion: 'TallyPrime (Port 9000)',
+    tallyVersion: 'TallyPrime 4.x / ERP 9',
+    latencyMs: 0,
   });
 
   const showToast = useCallback((msg: string) => {
@@ -85,11 +89,12 @@ export default function App() {
     [bills, config, bridgeStatus.companyName]
   );
 
-  // Live probe function to test real HTTP connectivity with Tally Prime
+  // Live probe function to test real HTTP connectivity with tally-bridge.exe Windows service
   const probeTallyConnection = useCallback(
     async (endpoint: string, silent: boolean = false) => {
+      const startTime = performance.now();
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 800);
+      const timer = setTimeout(() => controller.abort(), 900);
       const currentTime = new Date().toLocaleTimeString('en-IN', {
         hour: '2-digit',
         minute: '2-digit',
@@ -97,15 +102,24 @@ export default function App() {
       });
 
       try {
-        const res = await fetch(`http://${endpoint}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/xml' },
-          body: '<ENVELOPE><HEADER><TALLYREQUEST>Export</TALLYREQUEST></HEADER><BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>List of Companies</REPORTNAME></REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>',
+        // Try Windows service health endpoint or Tally XML request
+        const res = await fetch(`http://${endpoint}/health`, {
+          method: 'GET',
           signal: controller.signal,
+        }).catch(async () => {
+          // Fallback to XML probe if /health is not standard
+          return await fetch(`http://${endpoint}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/xml' },
+            body: '<ENVELOPE><HEADER><TALLYREQUEST>Export</TALLYREQUEST></HEADER><BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>List of Companies</REPORTNAME></REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>',
+            signal: controller.signal,
+          });
         });
-        clearTimeout(timer);
 
-        if (res.ok) {
+        clearTimeout(timer);
+        const latency = Math.round(performance.now() - startTime);
+
+        if (res && res.ok) {
           const txt = await res.text().catch(() => '');
           let compName = bridgeStatus.companyName;
           const matchComp = txt.match(/<COMPANYNAME>([^<]+)<\/COMPANYNAME>/);
@@ -117,10 +131,11 @@ export default function App() {
             mode: 'live-localhost',
             companyName: compName,
             lastPingTime: currentTime,
+            latencyMs: latency,
           }));
 
           if (!silent) {
-            showToast(`Connected to live Tally Prime on http://${endpoint} (${compName})`);
+            showToast(`Connected to local tally-bridge.exe on http://${endpoint} (${latency}ms)`);
           }
           return true;
         } else {
@@ -130,7 +145,7 @@ export default function App() {
             lastPingTime: currentTime,
           }));
           if (!silent) {
-            showToast(`Tally returned HTTP ${res.status}. Bridge marked as Offline.`);
+            showToast(`tally-bridge.exe is Offline on http://${endpoint}. Start tally-bridge.exe Windows service.`);
           }
           return false;
         }
@@ -142,7 +157,7 @@ export default function App() {
           lastPingTime: currentTime,
         }));
         if (!silent) {
-          showToast(`Tally Prime is Offline / Unreachable on http://${endpoint}`);
+          showToast(`tally-bridge.exe is Offline on http://${endpoint}. Please run tally-bridge.exe locally.`);
         }
         return false;
       }
@@ -150,14 +165,13 @@ export default function App() {
     [bridgeStatus.companyName, showToast]
   );
 
-  // Probe Tally connectivity on initial startup silently
+  // Probe service connectivity on initial mount
   useEffect(() => {
     probeTallyConnection(bridgeStatus.endpoint, true);
   }, [bridgeStatus.endpoint, probeTallyConnection]);
 
   const handleToggleBridgeConnection = useCallback(() => {
     if (!bridgeStatus.connected) {
-      // Actively probe connection
       probeTallyConnection(bridgeStatus.endpoint, false);
     } else {
       setBridgeStatus((prev) => ({
@@ -169,7 +183,7 @@ export default function App() {
           second: '2-digit',
         }),
       }));
-      showToast(`Tally Bridge set to Disconnected (${bridgeStatus.endpoint})`);
+      showToast(`tally-bridge.exe connection paused (${bridgeStatus.endpoint})`);
     }
   }, [bridgeStatus.connected, bridgeStatus.endpoint, probeTallyConnection, showToast]);
 
@@ -178,27 +192,34 @@ export default function App() {
   }, [bridgeStatus.endpoint, probeTallyConnection]);
 
   /**
-   * Fetches latest Sales Voucher sequence from Tally Prime / ERP 9
-   * and updates Starting Bill No while keeping it 100% editable
+   * Fetches latest Sales Voucher sequence from Tally via tally-bridge.exe
    */
   const handleFetchInvoiceFromTally = useCallback(async () => {
     setIsFetchingInvoice(true);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 800);
+    const timer = setTimeout(() => controller.abort(), 900);
 
     let nextVoucherNumber = 1041;
     let fetchedPrefix = 'CS/26-27/';
     let liveFetched = false;
 
     try {
-      const res = await fetch(`http://${bridgeStatus.endpoint}`, {
+      const res = await fetch(`http://${bridgeStatus.endpoint}/query`, {
         method: 'POST',
-        headers: { 'Content-Type': 'text/xml' },
-        body: `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER><BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>Voucher Register</REPORTNAME><STATICVARIABLES><VOUCHERTYPENAME>Sales</VOUCHERTYPENAME></STATICVARIABLES></REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'GET_NEXT_VOUCHER_NO', voucherType: 'Sales' }),
         signal: controller.signal,
+      }).catch(async () => {
+        return await fetch(`http://${bridgeStatus.endpoint}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/xml' },
+          body: `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER><BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>Voucher Register</REPORTNAME><STATICVARIABLES><VOUCHERTYPENAME>Sales</VOUCHERTYPENAME></STATICVARIABLES></REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`,
+          signal: controller.signal,
+        });
       });
+
       clearTimeout(timer);
-      if (res.ok) {
+      if (res && res.ok) {
         const txt = await res.text();
         const match = txt.match(/<VOUCHERNUMBER>([^<]+)<\/VOUCHERNUMBER>/);
         if (match && match[1]) {
@@ -234,8 +255,8 @@ export default function App() {
 
     showToast(
       liveFetched
-        ? `Live fetched from Tally: Next Voucher is ${fetchedPrefix}${nextVoucherNumber} (Editable)`
-        : `Tally is offline. Generated sequential invoice number: ${fetchedPrefix}${nextVoucherNumber} (Editable)`
+        ? `Live fetched from Tally: Next Voucher is ${fetchedPrefix}${nextVoucherNumber}`
+        : `Generated sequential invoice number: ${fetchedPrefix}${nextVoucherNumber} (Editable)`
     );
   }, [bridgeStatus.endpoint, bills, config.startingBillNo, setConfig, setBills, showToast]);
 
@@ -248,17 +269,25 @@ export default function App() {
 
     let liveSocketSucceeded = false;
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 600);
+    const timeoutId = setTimeout(() => controller.abort(), 750);
 
     try {
-      const res = await fetch(`http://${bridgeStatus.endpoint}`, {
+      const res = await fetch(`http://${bridgeStatus.endpoint}/push`, {
         method: 'POST',
         headers: { 'Content-Type': 'text/xml;charset=UTF-8' },
         body: xmlPayload,
         signal: controller.signal,
+      }).catch(async () => {
+        return await fetch(`http://${bridgeStatus.endpoint}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/xml;charset=UTF-8' },
+          body: xmlPayload,
+          signal: controller.signal,
+        });
       });
+
       clearTimeout(timeoutId);
-      if (res.ok) {
+      if (res && res.ok) {
         liveSocketSucceeded = true;
         setBridgeStatus((prev) => ({ ...prev, connected: true }));
       }
@@ -268,11 +297,11 @@ export default function App() {
 
     if (!bridgeStatus.connected && !liveSocketSucceeded) {
       setHttpAttemptNotice(
-        `Tally Prime is currently Offline on http://${bridgeStatus.endpoint}. You can start Tally Prime and enable XML server (Port 9000), or download the Tally XML file below to import via Tally (Alt+Z -> Import -> Vouchers).`
+        `Local Windows background service (tally-bridge.exe on http://${bridgeStatus.endpoint}) is currently Offline. You can start tally-bridge.exe, or export the Tally XML file directly using "Download XML" below to import into Tally Prime.`
       );
     } else {
       setHttpAttemptNotice(
-        `Connected to Tally Prime on http://${bridgeStatus.endpoint} (${bridgeStatus.companyName}). Imported ${bills.length} sales vouchers!`
+        `Connected to tally-bridge.exe on http://${bridgeStatus.endpoint} (${bridgeStatus.companyName}). Imported ${bills.length} sales vouchers!`
       );
     }
 
@@ -299,7 +328,7 @@ export default function App() {
         status: isSuccess ? 'success' : 'error',
         tallyMasterId: masterId,
         message: !liveSocketSucceeded
-          ? `Port ${bridgeStatus.endpoint} unreachable (Tally Offline) · Ready for XML download`
+          ? `Service http://${bridgeStatus.endpoint} unreachable (tally-bridge.exe Offline) · Ready for XML download`
           : isOverLimit
           ? `Rejected: Bill ₹${b.finalBillAmount.toLocaleString('en-IN')} exceeds ₹${config.maxBillLimit.toLocaleString('en-IN')}`
           : `<CREATED>1</CREATED> · Ledger ${b.postAccountName}`,
@@ -381,6 +410,7 @@ export default function App() {
         onPingBridge={handlePingBridge}
         onPushToTally={handlePushToTally}
         onOpenBankImport={() => setActiveTab('bank-statement')}
+        onOpenAdminKeyGen={() => setAdminModalOpen(true)}
         isPushing={isPushing}
         billCount={bills.length}
         unsyncedCount={unsyncedCount}
@@ -487,6 +517,12 @@ export default function App() {
           />
         )}
       </main>
+
+      {/* Admin Key Generator Modal (PIN Protected) */}
+      <AdminKeyGenerator
+        isOpen={adminModalOpen}
+        onClose={() => setAdminModalOpen(false)}
+      />
 
       {/* Bank Statement Modal */}
       <BankStatementModal
