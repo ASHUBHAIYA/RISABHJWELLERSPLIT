@@ -244,7 +244,7 @@ export function generateTallyXmlEnvelope(
           <FBTPAYMENTTYPE>Default</FBTPAYMENTTYPE>
           <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
           <ISINVOICE>Yes</ISINVOICE>
-          <NARRATION>Retail Counter Bullion Cash Sale - Split Batch #${bill.billNumber} (${bill.weight.toFixed(3)} ${escapeXml(config.unitLabel)} @ ${bill.rate.toFixed(2)})</NARRATION>
+          <NARRATION>Retail Counter Bullion Cash Sale - Split Batch #${bill.billNumber} (${bill.weight.toFixed(3)} GMS @ ${bill.rate.toFixed(2)})</NARRATION>
           <ALLLEDGERENTRIES.LIST>
             <LEDGERNAME>${escapeXml(bill.postAccountName)}</LEDGERNAME>
             <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
@@ -273,10 +273,10 @@ export function generateTallyXmlEnvelope(
             <STOCKITEMNAME>${escapeXml(bill.itemName)}</STOCKITEMNAME>
             <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
             <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
-            <RATE>${bill.rate.toFixed(2)}/${escapeXml(config.unitLabel)}</RATE>
+            <RATE>${bill.rate.toFixed(2)}/GMS</RATE>
             <AMOUNT>${bill.grossAmount.toFixed(2)}</AMOUNT>
-            <ACTUALQTY> ${bill.weight.toFixed(3)} ${escapeXml(config.unitLabel)}</ACTUALQTY>
-            <BILLEDQTY> ${bill.weight.toFixed(3)} ${escapeXml(config.unitLabel)}</BILLEDQTY>
+            <ACTUALQTY>${bill.weight.toFixed(3)} GMS</ACTUALQTY>
+            <BILLEDQTY>${bill.weight.toFixed(3)} GMS</BILLEDQTY>
             <ACCOUNTINGALLOCATIONS.LIST>
               <LEDGERNAME>${escapeXml(bill.itemSalesAccount)}</LEDGERNAME>
               <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
