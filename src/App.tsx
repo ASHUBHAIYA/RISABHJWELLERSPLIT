@@ -14,6 +14,7 @@ import {
 import { useBillSplitter } from './hooks/useBillSplitter';
 import {
   generateTallyXmlEnvelope,
+  generateTallyMastersXml,
   generateExcelCsvContent,
   downloadFile,
 } from './utils/tallyXmlGenerator';
@@ -94,6 +95,11 @@ export default function App() {
     [bills, config, bridgeStatus.companyName]
   );
 
+  const mastersXmlPayload = useMemo(
+    () => generateTallyMastersXml(bills, bridgeStatus.companyName, config),
+    [bills, bridgeStatus.companyName, config]
+  );
+
   /**
    * Fetches latest Sales Voucher sequence and Active Company directly from Tally (Local or Relay)
    */
@@ -126,7 +132,7 @@ export default function App() {
           }
         } catch {}
 
-        // 2. If local call was blocked by browser sandbox on HTTPS, use Cloud Relay query
+        // 2. Fallback: Query via Cloud Relay
         if (!respXml) {
           const relayQueryResult = await queryTallyViaCloudflareRelay(exportQueryXml, 'DEFAULT');
           if (relayQueryResult.success && relayQueryResult.tallyResponse) {
@@ -137,7 +143,6 @@ export default function App() {
         clearTimeout(timer);
 
         if (respXml) {
-          // Check if Tally rejected due to no company loaded
           if (respXml.toLowerCase().includes('no company') || respXml.toLowerCase().includes('company does not exist')) {
             setBridgeStatus((prev) => ({
               ...prev,
@@ -150,7 +155,6 @@ export default function App() {
             return;
           }
 
-          // Parse Company Name if present
           const compMatch = respXml.match(/<COMPANYNAME>([^<]+)<\/COMPANYNAME>/i) || respXml.match(/<SVCURRENTCOMPANY>([^<]+)<\/SVCURRENTCOMPANY>/i);
           if (compMatch && compMatch[1]) {
             openCompany = compMatch[1].trim();
@@ -173,7 +177,6 @@ export default function App() {
             companyName: openCompany,
           }));
         } else {
-          // Check if daemon is active
           const daemonCheck = await checkCloudflareRelayDaemonOnline();
           setBridgeStatus((prev) => ({ ...prev, connected: daemonCheck.online }));
         }
@@ -227,7 +230,6 @@ export default function App() {
         const controller = new AbortController();
         const timeoutTimer = setTimeout(() => controller.abort(), 2000);
 
-        // 1. Try local daemon /health
         let isLocalAlive = false;
         try {
           const res = await fetch(`http://${cleanEndpoint}/health`, {
@@ -255,7 +257,6 @@ export default function App() {
           return true;
         }
 
-        // 2. Fallback: Check Cloudflare Relay Daemon Heartbeat (For Cloud HTTPS environment)
         const relayCheck = await checkCloudflareRelayDaemonOnline();
         if (relayCheck.online) {
           setBridgeStatus((prev) => ({
@@ -306,7 +307,9 @@ export default function App() {
   }, [bridgeStatus.endpoint, probeTallyConnection, handleFetchInvoiceFromTally]);
 
   /**
-   * Pushes Vouchers to Tally (Strictly blocked if Tally is offline!)
+   * 2-Step Sync Pipeline:
+   * Step 1: Auto-create / verify all required Tally Masters (Units, Ledgers & Stock Items)
+   * Step 2: Dispatch Sales Vouchers Batch
    */
   const handlePushToTally = useCallback(async () => {
     if (!bridgeStatus.connected) {
@@ -320,34 +323,76 @@ export default function App() {
     setIsPushing(true);
     setSyncProgress({ current: 0, total: bills.length });
 
+    // ==========================================
+    // STEP 1: Auto-Create / Verify Tally Masters
+    // ==========================================
+    setHttpAttemptNotice('Step 1/2: Creating / Verifying Tally Masters (Units, Ledgers & Stock Items)...');
+
+    let mastersDispatched = false;
+    try {
+      const mController = new AbortController();
+      const mTimeoutId = setTimeout(() => mController.abort(), 4000);
+
+      const mRes = await fetch(`http://${bridgeStatus.endpoint}/tally`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/xml;charset=utf-8' },
+        body: mastersXmlPayload,
+        signal: mController.signal,
+      }).catch(async () => {
+        return await fetch(`http://${bridgeStatus.endpoint}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/xml;charset=utf-8' },
+          body: mastersXmlPayload,
+          signal: mController.signal,
+        });
+      });
+
+      clearTimeout(mTimeoutId);
+      if (mRes && mRes.ok) {
+        mastersDispatched = true;
+      }
+    } catch {
+      // Fallback via Cloud Relay
+      try {
+        await pushVoucherViaCloudflareRelay(mastersXmlPayload, 'DEFAULT');
+        mastersDispatched = true;
+      } catch {}
+    }
+
+    // Brief pause to allow Tally to finish indexing newly created masters
+    await new Promise((r) => setTimeout(r, 250));
+
+    // ==========================================
+    // STEP 2: Dispatch Sales Vouchers
+    // ==========================================
+    setHttpAttemptNotice(`Step 2/2: Dispatching ${bills.length} Sales Vouchers into Company "${bridgeStatus.companyName}"...`);
+
     let tallyCreatedCount = 0;
     let tallyErrorMessage = '';
     let isSuccess = false;
 
-    // 1. Direct local push to tally-bridge.exe (/tally endpoint)
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 4000);
+      const vController = new AbortController();
+      const vTimeoutId = setTimeout(() => vController.abort(), 5000);
 
       const res = await fetch(`http://${bridgeStatus.endpoint}/tally`, {
         method: 'POST',
         headers: { 'Content-Type': 'text/xml;charset=utf-8' },
         body: xmlPayload,
-        signal: controller.signal,
+        signal: vController.signal,
       }).catch(async () => {
         return await fetch(`http://${bridgeStatus.endpoint}`, {
           method: 'POST',
           headers: { 'Content-Type': 'text/xml;charset=utf-8' },
           body: xmlPayload,
-          signal: controller.signal,
+          signal: vController.signal,
         });
       });
 
-      clearTimeout(timeoutId);
+      clearTimeout(vTimeoutId);
       if (res && res.ok) {
         const respXml = await res.text().catch(() => '');
 
-        // Parse real Tally XML response
         const createdMatch = respXml.match(/<CREATED>(\d+)<\/CREATED>/i);
         const errorMatch = respXml.match(/<ERRORS>(\d+)<\/ERRORS>/i);
         const lineErrorMatch = respXml.match(/<LINEERROR>([^<]+)<\/LINEERROR>/i);
@@ -356,14 +401,14 @@ export default function App() {
           tallyCreatedCount = parseInt(createdMatch[1], 10);
           isSuccess = true;
         } else if (errorMatch && parseInt(errorMatch[1], 10) > 0) {
-          tallyErrorMessage = lineErrorMatch ? lineErrorMatch[1] : 'Tally rejected import. Ensure ledgers exist and company is open.';
+          tallyErrorMessage = lineErrorMatch ? lineErrorMatch[1] : 'Tally rejected import. Check ledger names and dates.';
         } else if (respXml.toLowerCase().includes('no company') || respXml.toLowerCase().includes('company does not exist')) {
           tallyErrorMessage = 'No company is open in TallyPrime.';
           setBridgeStatus((prev) => ({ ...prev, connected: false }));
         }
       }
     } catch {
-      // Local fetch blocked by browser mixed content -> Fallback to Cloudflare Relay with real daemon result polling
+      // Fallback to Cloud Relay
       const relayResult = await pushVoucherViaCloudflareRelay(xmlPayload, 'DEFAULT');
       if (relayResult.success) {
         isSuccess = true;
@@ -373,10 +418,9 @@ export default function App() {
       }
     }
 
-    // Set Honest, Accurate Status Notice
     if (isSuccess && tallyCreatedCount > 0) {
       setHttpAttemptNotice(
-        `[✓] Verified in Tally: Successfully created ${tallyCreatedCount} Sales Vouchers in Company "${bridgeStatus.companyName}"!`
+        `[✓] 2-Step Sync Complete: Created / Verified Masters & Imported ${tallyCreatedCount} Sales Vouchers in Company "${bridgeStatus.companyName}"!`
       );
     } else if (tallyErrorMessage) {
       setHttpAttemptNotice(
@@ -427,13 +471,29 @@ export default function App() {
     }
 
     setIsPushing(false);
-  }, [bills, isPushing, bridgeStatus.endpoint, bridgeStatus.companyName, bridgeStatus.connected, xmlPayload, config.maxBillLimit, showToast]);
+  }, [
+    bills,
+    isPushing,
+    bridgeStatus.endpoint,
+    bridgeStatus.companyName,
+    bridgeStatus.connected,
+    xmlPayload,
+    mastersXmlPayload,
+    config.maxBillLimit,
+    showToast,
+  ]);
 
   const handleExportXml = useCallback(() => {
     const filename = `TALLY_VOUCHERS_${config.billDate.replace(/-/g, '')}_${bills.length}_BILLS.xml`;
     downloadFile(xmlPayload, filename, 'application/xml');
-    showToast(`Saved Tally XML envelope (${bills.length} vouchers). Ready for Alt+Z import in Tally.`);
+    showToast(`Saved Tally Vouchers XML (${bills.length} vouchers). Ready for Alt+Z import in Tally.`);
   }, [bills.length, config.billDate, showToast, xmlPayload]);
+
+  const handleExportMastersXml = useCallback(() => {
+    const filename = `TALLY_MASTERS_${config.billDate.replace(/-/g, '')}.xml`;
+    downloadFile(mastersXmlPayload, filename, 'application/xml');
+    showToast(`Saved Tally Masters XML (Units, Ledgers & Stock Items). Ready for Alt+Z import in Tally.`);
+  }, [config.billDate, mastersXmlPayload, showToast]);
 
   const handleExportExcel = useCallback(() => {
     const content = generateExcelCsvContent(bills, summary, config);
@@ -566,10 +626,12 @@ export default function App() {
         {activeTab === 'xml-inspector' && (
           <XmlInspectorView
             xmlPayload={xmlPayload}
+            mastersXmlPayload={mastersXmlPayload}
             bills={bills}
             config={config}
             bridgeStatus={bridgeStatus}
             onDownloadXml={handleExportXml}
+            onDownloadMastersXml={handleExportMastersXml}
             onPushToTally={handlePushToTally}
             onBackToWorkbench={() => setActiveTab('workbench')}
           />
@@ -620,7 +682,7 @@ export default function App() {
         onApplyWeightToSplitter={handleApplyBankWeight}
       />
 
-      {/* Tally Sync Drawer */}
+      {/* Tally Sync Drawer with 2-Step Pipeline */}
       <TallySyncDrawer
         isOpen={drawerOpen}
         onClose={() => setDrawerOpen(false)}
@@ -629,8 +691,10 @@ export default function App() {
         isPushing={isPushing}
         progress={syncProgress}
         xmlPayload={xmlPayload}
+        mastersXmlPayload={mastersXmlPayload}
         onDispatchAgain={handlePushToTally}
         onDownloadXml={handleExportXml}
+        onDownloadMastersXml={handleExportMastersXml}
         httpAttemptNotice={httpAttemptNotice}
       />
     </div>

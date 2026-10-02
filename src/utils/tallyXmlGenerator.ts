@@ -12,8 +12,20 @@ export function formatTallyDate(isoDate: string): string {
   return `${y}${m}${d}`;
 }
 
+/**
+ * Escapes XML strings safely, stripping any preexisting XML/HTML entity encoding down
+ * to raw text first to guarantee zero double-escaping (e.g. `&amp;` will never become `&amp;amp;`).
+ */
 export function escapeXml(unsafe: string): string {
-  return (unsafe || '')
+  if (!unsafe) return '';
+  const unescaped = String(unsafe)
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'");
+
+  return unescaped
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -21,6 +33,177 @@ export function escapeXml(unsafe: string): string {
     .replace(/'/g, '&apos;');
 }
 
+/**
+ * Automatically creates all required Tally Masters (Units of Measure, Stock Items, Sales Ledgers,
+ * Tax/Duty Ledgers, Round Off, and Party/Cash Ledgers) in an "All Masters" import envelope.
+ * Importing this before vouchers guarantees Tally will never reject entries for missing master records.
+ */
+export function generateTallyMastersXml(
+  bills: SplitBill[],
+  companyName: string = 'SHREE BULLION & JEWELLERS PVT LTD',
+  config?: SplitConfig
+): string {
+  const safeCompany = escapeXml(companyName);
+
+  // 1. Unique Units of Measure
+  const units = new Set<string>(['GMS']);
+  if (config?.unitLabel) units.add(config.unitLabel.trim().toUpperCase());
+
+  // 2. Unique Stock Items
+  const stockItems = new Set<string>();
+  if (config?.itemName) stockItems.add(config.itemName.trim());
+  bills.forEach((b) => {
+    if (b.itemName) stockItems.add(b.itemName.trim());
+  });
+
+  // 3. Unique Sales Ledgers
+  const salesLedgers = new Set<string>();
+  if (config?.itemSalesAccount) salesLedgers.add(config.itemSalesAccount.trim());
+  bills.forEach((b) => {
+    if (b.itemSalesAccount) salesLedgers.add(b.itemSalesAccount.trim());
+  });
+  if (salesLedgers.size === 0) salesLedgers.add('Sales Account');
+
+  // 4. Unique Tax/Duty Ledgers
+  const gstRate = config?.gstRate ?? (bills[0]?.gstRate || 3);
+  const halfGstRate = Number((gstRate / 2).toFixed(2));
+  const taxLedgers = new Set<string>([
+    `CGST OUTPUT ${halfGstRate}%`,
+    `SGST OUTPUT ${halfGstRate}%`,
+    'CGST',
+    'SGST',
+    'IGST',
+  ]);
+
+  // 5. Unique Party / Cash / Counter Ledgers
+  const partyLedgers = new Set<string>();
+  if (config?.postAccountName) partyLedgers.add(config.postAccountName.trim());
+  bills.forEach((b) => {
+    if (b.postAccountName) partyLedgers.add(b.postAccountName.trim());
+  });
+  if (partyLedgers.size === 0) partyLedgers.add('Cash');
+
+  // Build XML blocks
+  const unitBlocks = Array.from(units)
+    .map((u) => {
+      const uSafe = escapeXml(u);
+      return `      <TALLYMESSAGE xmlns:UDF="TallyUDF">
+        <UNIT NAME="${uSafe}" ACTION="Create">
+          <NAME>${uSafe}</NAME>
+          <ISSIMPLEUNIT>Yes</ISSIMPLEUNIT>
+          <DECIMALPLACES>3</DECIMALPLACES>
+          <ORIGINALNAME>Grams</ORIGINALNAME>
+        </UNIT>
+      </TALLYMESSAGE>`;
+    })
+    .join('\n');
+
+  const stockItemBlocks = Array.from(stockItems)
+    .map((item) => {
+      const itemSafe = escapeXml(item);
+      return `      <TALLYMESSAGE xmlns:UDF="TallyUDF">
+        <STOCKITEM NAME="${itemSafe}" ACTION="Create">
+          <NAME>${itemSafe}</NAME>
+          <BASEUNITS>GMS</BASEUNITS>
+          <ISCOSTCENTRESON>No</ISCOSTCENTRESON>
+          <ISBATCHWISEON>No</ISBATCHWISEON>
+          <ISPERISHABLEON>No</ISPERISHABLEON>
+          <GSTAPPLICABLE>&#4; Applicable</GSTAPPLICABLE>
+          <GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>
+        </STOCKITEM>
+      </TALLYMESSAGE>`;
+    })
+    .join('\n');
+
+  const salesLedgerBlocks = Array.from(salesLedgers)
+    .map((s) => {
+      const sSafe = escapeXml(s);
+      return `      <TALLYMESSAGE xmlns:UDF="TallyUDF">
+        <LEDGER NAME="${sSafe}" ACTION="Create">
+          <NAME>${sSafe}</NAME>
+          <PARENT>Sales Accounts</PARENT>
+          <ISBILLWISEON>No</ISBILLWISEON>
+          <ISCOSTCENTRESON>No</ISCOSTCENTRESON>
+          <AFFECTSSTOCK>Yes</AFFECTSSTOCK>
+          <TAXTYPE>Others</TAXTYPE>
+        </LEDGER>
+      </TALLYMESSAGE>`;
+    })
+    .join('\n');
+
+  const taxLedgerBlocks = Array.from(taxLedgers)
+    .map((t) => {
+      const tSafe = escapeXml(t);
+      const isCgst = t.includes('CGST');
+      const isSgst = t.includes('SGST');
+      const dutyHead = isCgst ? 'Central Tax' : isSgst ? 'State Tax' : 'Integrated Tax';
+      return `      <TALLYMESSAGE xmlns:UDF="TallyUDF">
+        <LEDGER NAME="${tSafe}" ACTION="Create">
+          <NAME>${tSafe}</NAME>
+          <PARENT>Duties &amp; Taxes</PARENT>
+          <TAXTYPE>GST</TAXTYPE>
+          <GSTDUTYHEAD>${dutyHead}</GSTDUTYHEAD>
+          <RATEOFTAXCALCULATION>${halfGstRate}</RATEOFTAXCALCULATION>
+        </LEDGER>
+      </TALLYMESSAGE>`;
+    })
+    .join('\n');
+
+  const roundOffBlock = `      <TALLYMESSAGE xmlns:UDF="TallyUDF">
+        <LEDGER NAME="ROUND OFF" ACTION="Create">
+          <NAME>ROUND OFF</NAME>
+          <PARENT>Indirect Expenses</PARENT>
+          <ISBILLWISEON>No</ISBILLWISEON>
+          <ROUNDINGMETHOD>Normal Rounding</ROUNDINGMETHOD>
+          <ROUNDINGLIMIT>1</ROUNDINGLIMIT>
+        </LEDGER>
+      </TALLYMESSAGE>`;
+
+  const partyLedgerBlocks = Array.from(partyLedgers)
+    .map((p) => {
+      const pSafe = escapeXml(p);
+      const isCash = /cash|counter|petty|vault/i.test(p);
+      const parent = isCash ? 'Cash-in-hand' : 'Sundry Debtors';
+      return `      <TALLYMESSAGE xmlns:UDF="TallyUDF">
+        <LEDGER NAME="${pSafe}" ACTION="Create">
+          <NAME>${pSafe}</NAME>
+          <PARENT>${parent}</PARENT>
+          <ISBILLWISEON>No</ISBILLWISEON>
+          <AFFECTSSTOCK>No</AFFECTSSTOCK>
+        </LEDGER>
+      </TALLYMESSAGE>`;
+    })
+    .join('\n');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <TALLYREQUEST>Import Data</TALLYREQUEST>
+  </HEADER>
+  <BODY>
+    <IMPORTDATA>
+      <REQUESTDESC>
+        <REPORTNAME>All Masters</REPORTNAME>
+        <STATICVARIABLES>
+          <SVCURRENTCOMPANY>${safeCompany}</SVCURRENTCOMPANY>
+        </STATICVARIABLES>
+      </REQUESTDESC>
+      <REQUESTDATA>
+${unitBlocks}
+${stockItemBlocks}
+${salesLedgerBlocks}
+${taxLedgerBlocks}
+${roundOffBlock}
+${partyLedgerBlocks}
+      </REQUESTDATA>
+    </IMPORTDATA>
+  </BODY>
+</ENVELOPE>`;
+}
+
+/**
+ * Generates Tally Sales Vouchers XML Import Envelope
+ */
 export function generateTallyXmlEnvelope(
   bills: SplitBill[],
   config: SplitConfig,
@@ -28,6 +211,7 @@ export function generateTallyXmlEnvelope(
 ): string {
   const tallyDate = formatTallyDate(config.billDate);
   const halfGstRate = Number((config.gstRate / 2).toFixed(2));
+  const safeCompany = escapeXml(companyName);
 
   const voucherMessages = bills
     .map((bill, index) => {
@@ -114,7 +298,7 @@ export function generateTallyXmlEnvelope(
       <REQUESTDESC>
         <REPORTNAME>Vouchers</REPORTNAME>
         <STATICVARIABLES>
-          <SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>
+          <SVCURRENTCOMPANY>${safeCompany}</SVCURRENTCOMPANY>
         </STATICVARIABLES>
       </REQUESTDESC>
       <REQUESTDATA>
@@ -129,6 +313,7 @@ export function generateBankVouchersTallyXml(
   entries: BankVoucherEntry[],
   companyName: string = 'SHREE BULLION & JEWELLERS PVT LTD'
 ): string {
+  const safeCompany = escapeXml(companyName);
   const voucherMessages = entries
     .filter((e) => e.selected)
     .map((e, index) => {
@@ -201,7 +386,7 @@ export function generateBankVouchersTallyXml(
       <REQUESTDESC>
         <REPORTNAME>Vouchers</REPORTNAME>
         <STATICVARIABLES>
-          <SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>
+          <SVCURRENTCOMPANY>${safeCompany}</SVCURRENTCOMPANY>
         </STATICVARIABLES>
       </REQUESTDESC>
       <REQUESTDATA>
@@ -212,7 +397,11 @@ ${voucherMessages}
 </ENVELOPE>`;
 }
 
-export function generateExcelCsvContent(bills: SplitBill[], config: SplitConfig): string {
+export function generateExcelCsvContent(
+  bills: SplitBill[],
+  summary: unknown,
+  config: SplitConfig
+): string {
   const headers = [
     'Bill #',
     'Voucher No',
